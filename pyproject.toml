@@ -1,0 +1,21 @@
+[project]
+name = "ga-best-practices"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "rdkit",
+    "chemprop==1.6.1",   # v1 — provides the chemprop_predict CLI
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+    "matplotlib",
+]
+
+[tool.uv]
+# chemprop 1.6.1 pulls in torch; if you need a specific CUDA build of torch,
+# install it first with the appropriate index URL before running `uv sync`, e.g.:
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu121
