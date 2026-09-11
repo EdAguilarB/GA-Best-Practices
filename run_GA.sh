@@ -37,6 +37,7 @@ python -u GA_main.py \
     --n_generations 500 \
     --spear_thresh 0.8 \
     --conv_gen 50 \
+    --n_jobs 10 \
     --aldehydes   "$REPO/aldehydes_curated_v3.csv" \
     --acids       "$REPO/acids_curated_v3.csv" \
     --amines      "$REPO/amines_curated_v3.csv" \

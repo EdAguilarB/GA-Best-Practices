@@ -33,6 +33,7 @@ def main(
     elitism_perc=0.5,
     spear_thresh=0.8,
     conv_gen=50,
+    n_jobs=1,
 ):
     # reuse initial state — set to "y" to replay from a saved randstate file
     initial_restart = "n"
@@ -72,7 +73,7 @@ def main(
         open_params.close()
 
         # inject runtime values (not stored in pickle; always loaded fresh from CLI args)
-        while len(params) < 18:
+        while len(params) < 19:
             params.append(None)
         params[9] = checkpoint_dirs
         params[10] = ref_features_row
@@ -80,6 +81,7 @@ def main(
         params[12] = maximize
         params[13] = output_dir
         params[16] = spear_thresh
+        params[18] = n_jobs
 
         randstate_filename = randstate_path
         open_rand = open(randstate_filename, "rb")
@@ -116,6 +118,7 @@ def main(
             maximize,
             output_dir,
             spear_thresh,
+            n_jobs,
         )
 
         # pickle parameters needed for restart
@@ -260,6 +263,7 @@ def next_gen(params):
     block_freq = params[14]
     spear_counter = params[15]
     spear_thresh = params[16]
+    n_jobs = params[18]
 
     gen_counter += 1
     ranked_population = fitness_list[1]
@@ -282,7 +286,7 @@ def next_gen(params):
     )
 
     fitness_list = scoring.fitness_function(
-        new_population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize
+        new_population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs
     )
 
     median = int((len(fitness_list[0]) - 1) / 2)
@@ -346,6 +350,7 @@ def next_gen(params):
         spear_counter,
         spear_thresh,
         spear,
+        n_jobs,
     ]
 
     return params
@@ -760,6 +765,7 @@ def init_gen(
     maximize,
     output_dir,
     spear_thresh,
+    n_jobs,
 ):
     """
     Create initial population
@@ -820,7 +826,7 @@ def init_gen(
         full_writer.writerow(["gen", "individual", "score", "score_std"])
 
     fitness_list = scoring.fitness_function(
-        population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize
+        population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs
     )
 
     median = int((len(fitness_list[0]) - 1) / 2)
@@ -862,6 +868,7 @@ def init_gen(
         0,
         spear_thresh,
         0.0,
+        n_jobs,
     ]
 
     return params
@@ -915,6 +922,10 @@ if __name__ == "__main__":
     # self-termination: stop once the favoured building blocks stop reshuffling
     parser.add_argument("--spear_thresh", type=float, default=0.8)
     parser.add_argument("--conv_gen", type=int, default=50)
+    # how many ensemble members to score concurrently. Most of a member's wall
+    # time is interpreter start-up, so this is close to a linear speed-up until
+    # it reaches the number of models. Set it to your allocated core count.
+    parser.add_argument("--n_jobs", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -936,4 +947,5 @@ if __name__ == "__main__":
         args.elitism_perc,
         args.spear_thresh,
         args.conv_gen,
+        args.n_jobs,
     )

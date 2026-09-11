@@ -5,6 +5,7 @@ import gzip
 import os
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from rdkit import Chem
 
 def parse_GFN2(filename):
@@ -198,7 +199,7 @@ def compute_reference_row(extra_x_path):
     return df.mean().tolist(), list(df.columns)
 
 
-def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize):
+def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs=1):
     """
     Score a population using an ensemble of ChemProp v1 models via the CLI.
     Each molecule is evaluated under the fixed reference formulation conditions.
@@ -220,9 +221,8 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
             [ref_features_row] * len(smiles_list), columns=ref_features_cols
         ).to_csv(features_path, index=False)
 
-        all_preds = []
-        for i, ckpt_dir in enumerate(checkpoint_dirs):
-            print(f"  Scoring with model {i+1}/{len(checkpoint_dirs)}...", flush=True)
+        def predict_with(job):
+            i, ckpt_dir = job
             preds_path = os.path.join(tmpdir, f"preds_{i}.csv")
             result = subprocess.run(
                 [
@@ -236,12 +236,29 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
                 ],
                 capture_output=True,
                 text=True,
+                # each model scores the same handful of molecules, so the work per
+                # process is trivial; letting each spawn its own thread pool just
+                # makes them fight over cores while running concurrently
+                env={**os.environ, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
             )
             if result.returncode != 0:
                 raise RuntimeError(
                     f"chemprop_predict failed for {ckpt_dir}:\n{result.stderr}"
                 )
-            all_preds.append(pd.read_csv(preds_path)["Experiment_value"].tolist())
+            return pd.read_csv(preds_path)["Experiment_value"].tolist()
+
+        # The ensemble members are independent and each spends most of its time
+        # in interpreter start-up rather than computing, so running them at once
+        # collapses roughly ten start-ups into one. Threads suffice: every worker
+        # is blocked in subprocess.run, holding no GIL.
+        workers = min(n_jobs, len(checkpoint_dirs))
+        print(
+            f"  scoring {len(smiles_list)} molecules against "
+            f"{len(checkpoint_dirs)} models ({workers} at a time)...",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            all_preds = list(pool.map(predict_with, enumerate(checkpoint_dirs)))
 
     all_preds = np.array(all_preds)
     score_list = list(all_preds.mean(axis=0))
