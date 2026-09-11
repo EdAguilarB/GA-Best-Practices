@@ -16,6 +16,14 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_LABEL="${1:?usage: bash run_GA.sh <RUN_LABEL> [extra GA_main.py args]}"
+# Without this, a forgotten label makes the first flag the label, and the failure
+# surfaces much later as a confusing argparse error about that flag.
+if [[ "$RUN_LABEL" == -* ]]; then
+    echo "error: first argument must be a run label, not an option (got '$RUN_LABEL')" >&2
+    echo "usage: bash run_GA.sh <RUN_LABEL> [extra GA_main.py args]" >&2
+    echo "   eg: bash run_GA.sh CALIB --pop_size 96 --n_generations 5" >&2
+    exit 2
+fi
 shift
 OUT="$REPO/results/run_$RUN_LABEL"
 
