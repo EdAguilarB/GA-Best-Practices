@@ -1,0 +1,35 @@
+[project]
+name = "ga-best-practices"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy<2",           # chemprop 1.6.1 uses np.VisibleDeprecationWarning, removed in numpy 2.0
+    "pandas<3",          # chemprop 1.6.1 predates the pandas 3.0 API removals
+    "rdkit",
+    "torch<2.6",         # torch 2.6 flipped torch.load weights_only to True; chemprop 1.6.1 checkpoints need False
+    "chemprop==1.6.1",   # v1 — provides the chemprop_predict CLI
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+    "matplotlib",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+# result CSVs and notebooks from the upstream study are not ours to reformat
+extend-exclude = ["data_analysis", "optimized_ga", "PCA"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort
+select = ["E", "W", "F", "I"]
+# the formatter owns line breaking; it leaves long comments and strings alone
+ignore = ["E501"]
+
+[tool.uv]
+# chemprop 1.6.1 pulls in torch; if you need a specific CUDA build of torch,
+# install it first with the appropriate index URL before running `uv sync`, e.g.:
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu121
