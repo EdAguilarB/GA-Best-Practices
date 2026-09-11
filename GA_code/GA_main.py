@@ -1,18 +1,18 @@
 # Imports
+import argparse
 import ast
 import csv
 import os
+import pickle
 import random
 import time
-import numpy as np
 from copy import deepcopy
-import pickle
-import argparse
+
+import numpy as np
+import scoring
+import utils
 from rdkit import Chem
 from scipy.stats import spearmanr
-
-import utils
-import scoring
 
 
 def main(
@@ -42,9 +42,6 @@ def main(
     # Run number (for use with same initial states), can be A, B, C, D, or E
     # run_label = 'D'
 
-    # scoring property, retained only as a label in output filenames
-    scoring_prop = chem_property
-
     # GA run file name, encoding the hyperparameters actually used
     run_name = "%s_%s_%s" % (selection_method, chem_property, run_label)
 
@@ -61,9 +58,7 @@ def main(
     os.makedirs(output_dir, exist_ok=True)
     last_gen_path = os.path.join(output_dir, "last_gen_" + run_name + ".p")
     randstate_path = os.path.join(output_dir, "randstate_" + run_name + ".p")
-    initial_randstate = os.path.join(
-        output_dir, "initial_randstate_" + run_label + ".p"
-    )
+    initial_randstate = os.path.join(output_dir, "initial_randstate_" + run_label + ".p")
 
     if restart == "y":
         # reload parameters and random state from restart file
@@ -286,7 +281,13 @@ def next_gen(params):
     )
 
     fitness_list = scoring.fitness_function(
-        new_population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs
+        new_population,
+        checkpoint_dirs,
+        unit_list,
+        ref_features_row,
+        ref_features_cols,
+        maximize,
+        n_jobs,
     )
 
     median = int((len(fitness_list[0]) - 1) / 2)
@@ -317,9 +318,7 @@ def next_gen(params):
     quick_filename = os.path.join(output_dir, "quick_analysis_" + run_name + ".csv")
     with open(quick_filename, mode="a+") as quick_file:
         quick_writer = csv.writer(quick_file)
-        quick_writer.writerow(
-            [gen_counter, min_score, med_score, max_score, spear, spear_counter]
-        )
+        quick_writer.writerow([gen_counter, min_score, med_score, max_score, spear, spear_counter])
 
     for x in range(len(fitness_list[0])):
         poly = fitness_list[1][x]
@@ -532,9 +531,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
                 # fitness proportion
                 fitness = ranked_scores[x] / total
                 # appends the bottom and top limits of the pie, the score, and the polymer
-                wheel.append(
-                    (limit, limit + fitness, ranked_scores[x], ranked_population[x])
-                )
+                wheel.append((limit, limit + fitness, ranked_scores[x], ranked_population[x]))
                 limit += fitness
 
         else:
@@ -545,9 +542,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
                 # fitness proportion
                 fitness = inversed_scores[x] / total
                 # appends the bottom and top limits of the pie, the score, and the polymer
-                wheel.append(
-                    (limit, limit + fitness, inversed_scores[x], ranked_population[x])
-                )
+                wheel.append((limit, limit + fitness, inversed_scores[x], ranked_population[x]))
                 limit += fitness
 
         # random number between 0 and 1
@@ -575,9 +570,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
                 # fitness proportion
                 fitness = ranked_scores[x] / total
                 # appends the bottom and top limits of the pie, the score, and the polymer
-                wheel.append(
-                    (limit, limit + fitness, ranked_scores[x], ranked_population[x])
-                )
+                wheel.append((limit, limit + fitness, ranked_scores[x], ranked_population[x]))
                 limit += fitness
 
         else:
@@ -588,9 +581,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
                 # fitness proportion
                 fitness = inversed_scores[x] / total
                 # appends the bottom and top limits of the pie, the score, and the polymer
-                wheel.append(
-                    (limit, limit + fitness, inversed_scores[x], ranked_population[x])
-                )
+                wheel.append((limit, limit + fitness, inversed_scores[x], ranked_population[x]))
                 limit += fitness
 
         # separation between selected points on wheel
@@ -684,7 +675,6 @@ def select_crossover_mutate(
 
     # loop until enough children have been added to reach population size
     while len(new_pop) < pop_size:
-
         # select two parents
         parents = parent_select(
             ranked_population, ranked_scores, selection_method, scoring_prop, maximize
@@ -704,7 +694,7 @@ def select_crossover_mutate(
         # check for duplication
         if temp_child in new_pop:
             pass
-        elif utils.not_valid(temp_child, unit_list) == True:
+        elif utils.not_valid(temp_child, unit_list):
             pass
         else:
             new_pop.append(temp_child)
@@ -807,7 +797,7 @@ def init_gen(
 
         if temp_poly in population:
             continue
-        elif utils.not_valid(temp_poly, unit_list) == True:
+        elif utils.not_valid(temp_poly, unit_list):
             pass
         else:
             population.append(temp_poly)
@@ -826,7 +816,13 @@ def init_gen(
         full_writer.writerow(["gen", "individual", "score", "score_std"])
 
     fitness_list = scoring.fitness_function(
-        population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs
+        population,
+        checkpoint_dirs,
+        unit_list,
+        ref_features_row,
+        ref_features_cols,
+        maximize,
+        n_jobs,
     )
 
     median = int((len(fitness_list[0]) - 1) / 2)

@@ -16,10 +16,10 @@ from ugi_reaction import get_ugi_product
 
 def make_unit_list(aldehydes, acids, amines, isocyanides):
     return {
-        "aldehyde":   pd.read_csv(aldehydes,   usecols=["smiles"], index_col=False),
-        "acid":       pd.read_csv(acids,        usecols=["smiles"], index_col=False),
-        "amine":      pd.read_csv(amines,       usecols=["smiles"], index_col=False),
-        "isocyanide": pd.read_csv(isocyanides,  usecols=["smiles"], index_col=False),
+        "aldehyde": pd.read_csv(aldehydes, usecols=["smiles"], index_col=False),
+        "acid": pd.read_csv(acids, usecols=["smiles"], index_col=False),
+        "amine": pd.read_csv(amines, usecols=["smiles"], index_col=False),
+        "isocyanide": pd.read_csv(isocyanides, usecols=["smiles"], index_col=False),
     }
 
 
@@ -54,9 +54,7 @@ def make_molecule(polymer, unit_list):
     acid = unit_list["acid"].iloc[polymer[1], 0]
     amine = unit_list["amine"].iloc[polymer[2], 0]
     iso = unit_list["isocyanide"].iloc[polymer[3], 0]
-    return get_ugi_product(
-        primary_amine=amine, carboxylic_acid=acid, aldehyde=ald, isocyanide=iso
-    )
+    return get_ugi_product(primary_amine=amine, carboxylic_acid=acid, aldehyde=ald, isocyanide=iso)
 
 
 def binSearch(wheel, num):
@@ -157,5 +155,5 @@ def not_valid(temp_child, unit_list):
     try:
         mol = make_molecule(temp_child, unit_list)
         return mol is None
-    except:
+    except Exception:
         return True

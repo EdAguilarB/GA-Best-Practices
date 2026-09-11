@@ -1,12 +1,14 @@
-import numpy as np
-import pandas as pd
-import utils
 import gzip
 import os
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+import pandas as pd
+import utils
 from rdkit import Chem
+
 
 def parse_GFN2(filename):
     """
@@ -152,7 +154,7 @@ def parse_sTDA(filename):
 
             return opt_bg
         else:
-            if potential_no_absoroption == True:
+            if potential_no_absoroption:
                 print("no absorption below 5 eV")
             else:
                 print("error with file")
@@ -199,7 +201,9 @@ def compute_reference_row(extra_x_path):
     return df.mean().tolist(), list(df.columns)
 
 
-def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs=1):
+def fitness_function(
+    population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs=1
+):
     """
     Score a population using an ensemble of ChemProp v1 models via the CLI.
     Each molecule is evaluated under the fixed reference formulation conditions.
@@ -217,9 +221,9 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
 
         # Reference formulation features — one row per molecule, same values for all
         features_path = os.path.join(tmpdir, "features.csv")
-        pd.DataFrame(
-            [ref_features_row] * len(smiles_list), columns=ref_features_cols
-        ).to_csv(features_path, index=False)
+        pd.DataFrame([ref_features_row] * len(smiles_list), columns=ref_features_cols).to_csv(
+            features_path, index=False
+        )
 
         def predict_with(job):
             i, ckpt_dir = job
@@ -227,12 +231,17 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
             result = subprocess.run(
                 [
                     "chemprop_predict",
-                    "--checkpoint_dir", ckpt_dir,
-                    "--test_path", smiles_path,
-                    "--features_path", features_path,
-                    "--preds_path", preds_path,
+                    "--checkpoint_dir",
+                    ckpt_dir,
+                    "--test_path",
+                    smiles_path,
+                    "--features_path",
+                    features_path,
+                    "--preds_path",
+                    preds_path,
                     # chemprop's default of 8 DataLoader workers deadlocks on macOS
-                    "--num_workers", "0",
+                    "--num_workers",
+                    "0",
                 ],
                 capture_output=True,
                 text=True,
@@ -242,9 +251,7 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
                 env={**os.environ, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
             )
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"chemprop_predict failed for {ckpt_dir}:\n{result.stderr}"
-                )
+                raise RuntimeError(f"chemprop_predict failed for {ckpt_dir}:\n{result.stderr}")
             return pd.read_csv(preds_path)["Experiment_value"].tolist()
 
         # The ensemble members are independent and each spends most of its time
@@ -292,9 +299,7 @@ def fitness_individual(polymer, scoring_prop):
     filename = utils.make_file_name(polymer)
     if scoring_prop == "polar":
         GFN2_file = (
-            "/ihome/ghutchison/blp62/GA_best_practices/Calculations/GFN2/"
-            + filename
-            + ".out"
+            "/ihome/ghutchison/blp62/GA_best_practices/Calculations/GFN2/" + filename + ".out"
         )
         GFN2_props = parse_GFN2(GFN2_file)  # dipole_moment, polarizability
         polarizability = GFN2_props[1]
@@ -302,9 +307,7 @@ def fitness_individual(polymer, scoring_prop):
 
     elif scoring_prop == "opt_bg":
         stda_file = (
-            "/ihome/ghutchison/blp62/GA_best_practices/Calculations/sTDDFTxtb/"
-            + filename
-            + ".stda"
+            "/ihome/ghutchison/blp62/GA_best_practices/Calculations/sTDDFTxtb/" + filename + ".stda"
         )
         opt_bg = parse_sTDA(stda_file)
         return opt_bg
@@ -329,7 +332,7 @@ def fitness_individual(polymer, scoring_prop):
 
             # ratio of water solvation energy to hexane solvation energy
             ratio_water_hexane = (solv_water - solv_hexane) / abs(solv_water)
-        except:
+        except Exception:
             ratio_water_hexane = 100000
 
         return ratio_water_hexane

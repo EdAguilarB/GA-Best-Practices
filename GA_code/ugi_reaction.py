@@ -23,20 +23,14 @@ def _unique_match(mol, smarts, name):
     isn't exactly one."""
     matches = mol.GetSubstructMatches(smarts)
     if len(matches) != 1:
-        print(
-            f"{len(matches)} matches were found for the {name}. Only one was expected"
-        )
+        print(f"{len(matches)} matches were found for the {name}. Only one was expected")
         return None
     return matches[0]
 
 
 def _live_attachments(mol):
     """Indices of atoms currently flagged as active attachment points."""
-    return [
-        a.GetIdx()
-        for a in mol.GetAtoms()
-        if a.HasProp("Attach") and a.GetBoolProp("Attach")
-    ]
+    return [a.GetIdx() for a in mol.GetAtoms() if a.HasProp("Attach") and a.GetBoolProp("Attach")]
 
 
 def _join_on_attachments(base, fragment, deactivate_base=True):
@@ -153,9 +147,7 @@ def get_ugi_product(primary_amine, carboxylic_acid, aldehyde, isocyanide):
     # the isocyanide carbon.
     rw = _join_on_attachments(acid, amine)  # acid C  --  amine N
     rw = _join_on_attachments(rw, ald)  # amine N --  aldehyde C
-    rw = _join_on_attachments(
-        rw, iso, deactivate_base=False
-    )  # aldehyde C -- isocyanide C
+    rw = _join_on_attachments(rw, iso, deactivate_base=False)  # aldehyde C -- isocyanide C
 
     mol = rw.GetMol()
     Chem.SanitizeMol(mol)
