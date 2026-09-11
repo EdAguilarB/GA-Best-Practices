@@ -1,0 +1,27 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Only ruff is needed to lint; installing the full dependency set would
+      # pull torch and chemprop for no benefit.
+      - name: Install ruff
+        run: uv tool install ruff
+
+      - name: Check import order and lint rules
+        run: uvx ruff check --output-format=github .
+
+      - name: Check formatting
+        run: uvx ruff format --check --diff .

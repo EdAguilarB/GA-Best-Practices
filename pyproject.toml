@@ -14,7 +14,20 @@ dependencies = [
 dev = [
     "jupyter",
     "matplotlib",
+    "ruff",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+# result CSVs and notebooks from the upstream study are not ours to reformat
+extend-exclude = ["data_analysis", "optimized_ga", "PCA"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort
+select = ["E", "W", "F", "I"]
+# the formatter owns line breaking; it leaves long comments and strings alone
+ignore = ["E501"]
 
 [tool.uv]
 # chemprop 1.6.1 pulls in torch; if you need a specific CUDA build of torch,
