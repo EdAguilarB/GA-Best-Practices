@@ -133,6 +133,18 @@ def update_block_freq(population, freq):
     return freq
 
 
+def blocks_used_per_slot(freq):
+    """
+    How many distinct building blocks each genome slot has drawn so far,
+    keyed by slot index (0 carbonyl, 1 acid, 2 amine, 3 isocyanide).
+    """
+    counts = {}
+    for uid in freq:
+        slot = uid // _SLOT_STRIDE
+        counts[slot] = counts.get(slot, 0) + 1
+    return counts
+
+
 def top_ranked_blocks(freq, n=10, min_count=2):
     """
     The n most-used building blocks, most-used first.

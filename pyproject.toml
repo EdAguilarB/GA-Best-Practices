@@ -29,7 +29,10 @@ select = ["E", "W", "F", "I"]
 # the formatter owns line breaking; it leaves long comments and strings alone
 ignore = ["E501"]
 
-[tool.uv]
-# chemprop 1.6.1 pulls in torch; if you need a specific CUDA build of torch,
-# install it first with the appropriate index URL before running `uv sync`, e.g.:
-#   uv pip install torch --index-url https://download.pytorch.org/whl/cu121
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

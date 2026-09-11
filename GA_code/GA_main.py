@@ -14,6 +14,10 @@ import utils
 from rdkit import Chem
 from scipy.stats import spearmanr
 
+# Genome layout: index i of an individual selects from COMPONENT_SLOTS[i]. Coverage
+# reporting decodes block ids by the same order, so keep it the single definition.
+COMPONENT_SLOTS = ["aldehyde", "acid", "amine", "isocyanide"]
+
 
 def main(
     chem_property,
@@ -167,6 +171,48 @@ def main(
 
     summary_path, n_unique = write_summary(output_dir, run_name, unit_list, maximize)
     print(f"Wrote {n_unique} unique candidates to {summary_path}", flush=True)
+    report_coverage(unit_list, params[14], n_unique)
+
+
+def report_coverage(unit_list, block_freq, n_products):
+    """
+    Log how much of the search space the run actually touched.
+
+    Per component this is the share of that library the GA has drawn at least
+    once. For products it is unique Ugi products scored against every
+    combination the four libraries admit -- a number so large that the share is
+    best read as "effectively none of it", which is the honest picture of what
+    any GA covers here.
+    """
+    used = utils.blocks_used_per_slot(block_freq)
+
+    total_products = 1
+    for comp in COMPONENT_SLOTS:
+        total_products *= len(unit_list[comp])
+
+    print("\nSearch space covered", flush=True)
+    for slot, comp in enumerate(COMPONENT_SLOTS):
+        library = len(unit_list[comp])
+        tried = used.get(slot, 0)
+        label = "carbonyl" if comp == "aldehyde" else comp
+        print(
+            f"  {label:<11}: {tried:>8,} / {library:>11,}  ({_as_pct(tried, library)})",
+            flush=True,
+        )
+    print(
+        f"  {'products':<11}: {n_products:>8,} / {total_products:>11.3e}  "
+        f"({_as_pct(n_products, total_products)})",
+        flush=True,
+    )
+
+
+def _as_pct(part, whole):
+    """Percentages here span ~50% down to 1e-15, so switch notation rather than
+    printing a column of zeroes."""
+    if whole == 0:
+        return "n/a"
+    pct = 100.0 * part / whole
+    return f"{pct:.4f}%" if pct >= 0.0001 else f"{pct:.2e}%"
 
 
 def write_summary(output_dir, run_name, unit_list, maximize):
@@ -708,7 +754,7 @@ def mutate(temp_child, unit_list, mut_rate):
         return temp_child
 
     point = random.randint(0, 3)  # 0=ald, 1=acid, 2=amine, 3=iso
-    components = ["aldehyde", "acid", "amine", "isocyanide"]
+    components = COMPONENT_SLOTS
     comp = components[point]
     temp_child[point] = random.randint(0, len(unit_list[comp]) - 1)
     return temp_child
@@ -790,7 +836,7 @@ def init_gen(
 
     while len(population) < pop_size:
         temp_poly = []
-        components = ["aldehyde", "acid", "amine", "isocyanide"]
+        components = COMPONENT_SLOTS
         for comp in components:
             idx = random.randint(0, len(unit_list[comp]) - 1)
             temp_poly.append(idx)
