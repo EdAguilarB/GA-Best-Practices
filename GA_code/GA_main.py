@@ -5,15 +5,27 @@ import numpy as np
 from copy import deepcopy
 import pickle
 import argparse
-import torch
 
 import utils
 import scoring
 
 
-def main(parameter_type, parameter, chem_property, run_label, model_path):
-    # reuse initial state
-    initial_restart = "y"
+def main(
+    parameter_type,
+    parameter,
+    chem_property,
+    run_label,
+    checkpoint_dirs,
+    features_ref_path,
+    n_generations=500,
+    aldehydes=None,
+    acids=None,
+    amines=None,
+    isocyanides=None,
+    maximize=False,
+):
+    # reuse initial state — set to "y" to replay from a saved randstate file
+    initial_restart = "n"
     # flag for restart from save
     restart = "n"
     # Run number (for use with same initial states), can be A, B, C, D, or E
@@ -61,20 +73,21 @@ def main(parameter_type, parameter, chem_property, run_label, model_path):
     else:
         print("not a valid parameter type")
 
-    # Number of generations to run
-    n_generations = 500
+    # Number of generations to run (overridable via --n_generations CLI flag)
 
     # GA run file name, with the format of "parameter_changed parameter_value fitness_property run_label(ABCDE)"
     run_name = (
         parameter_type + "_" + str(parameter) + "_" + chem_property + "_" + run_label
     )
 
-    # Load pre-trained scoring model
-    model = torch.load(model_path, weights_only=False)
-    model.eval()
+    # Pre-compute reference formulation features once (mean of each column across all training data)
+    print("Loading reference features...", flush=True)
+    ref_features_row, ref_features_cols = scoring.compute_reference_row(features_ref_path)
 
     # Create list of possible building block unit SMILES in specific format
-    unit_list = utils.make_unit_list()
+    print("Loading component CSVs...", flush=True)
+    unit_list = utils.make_unit_list(aldehydes, acids, amines, isocyanides)
+    print("Done loading. Starting GA...", flush=True)
 
     if restart == "y":
         # reload parameters and random state from restart file
@@ -83,11 +96,13 @@ def main(parameter_type, parameter, chem_property, run_label, model_path):
         params = pickle.load(open_params)
         open_params.close()
 
-        # inject model (not stored in pickle; always loaded fresh from model_path)
-        if len(params) <= 9:
-            params.append(model)
-        else:
-            params[9] = model
+        # inject runtime values (not stored in pickle; always loaded fresh from CLI args)
+        while len(params) < 13:
+            params.append(None)
+        params[9] = checkpoint_dirs
+        params[10] = ref_features_row
+        params[11] = ref_features_cols
+        params[12] = maximize
 
         randstate_filename = "../rand_states/randstate_" + run_name + ".p"
         open_rand = open(randstate_filename, "rb")
@@ -106,11 +121,9 @@ def main(parameter_type, parameter, chem_property, run_label, model_path):
             pickle.dump(randstate, rand_file)
             rand_file.close()
         else:
-            # re-opens intial state during troubleshooting
+            # re-opens saved initial state for exact reproducibility
             initial_randstate = (
-                "/ihome/ghutchison/blp62/GA_best_practices/initial_randstates/initial_randstate_"
-                + run_label
-                + ".p"
+                "../initial_randstates/initial_randstate_" + run_label + ".p"
             )
             open_rand = open(initial_randstate, "rb")
             randstate = pickle.load(open_rand)
@@ -126,7 +139,10 @@ def main(parameter_type, parameter, chem_property, run_label, model_path):
             run_name,
             chem_property,
             unit_list,
-            model,
+            checkpoint_dirs,
+            ref_features_row,
+            ref_features_cols,
+            maximize,
         )
 
         # pickle parameters needed for restart
@@ -185,7 +201,10 @@ def next_gen(params):
     elitism_perc = params[6]
     run_name = params[7]
     scoring_prop = params[8]
-    model = params[9]
+    checkpoint_dirs = params[9]
+    ref_features_row = params[10]
+    ref_features_cols = params[11]
+    maximize = params[12]
 
     gen_counter += 1
     ranked_population = fitness_list[1]
@@ -204,14 +223,17 @@ def next_gen(params):
         scoring_prop,
         pop_size,
         unit_list,
+        maximize,
     )
 
-    fitness_list = scoring.fitness_function(new_population, model, unit_list)
+    fitness_list = scoring.fitness_function(
+        new_population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize
+    )
 
-    min_score = fitness_list[0][0]
     median = int((len(fitness_list[0]) - 1) / 2)
+    min_score = min(fitness_list[0])
     med_score = fitness_list[0][median]
-    max_score = fitness_list[0][-1]
+    max_score = max(fitness_list[0])
 
     quick_filename = "../quick_files/quick_analysis_" + run_name + ".csv"
     with open(quick_filename, mode="a+") as quick_file:
@@ -237,13 +259,16 @@ def next_gen(params):
         elitism_perc,
         run_name,
         scoring_prop,
-        model,
+        checkpoint_dirs,
+        ref_features_row,
+        ref_features_cols,
+        maximize,
     ]
 
     return params
 
 
-def parent_select(ranked_population, ranked_scores, selection_method, scoring_prop):
+def parent_select(ranked_population, ranked_scores, selection_method, scoring_prop, maximize):
     """
     Selects two parents. Method of selection depends on selection_method
 
@@ -320,10 +345,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
             ]
 
             # find the index of the best fitness score
-            if scoring_prop == "polar":
-                best_index = np.argmax(scores)
-            else:
-                best_index = np.argmin(scores)
+            best_index = np.argmax(scores) if maximize else np.argmin(scores)
 
             best_individual = individuals[best_index]
             parent = ranked_population[best_individual]
@@ -371,10 +393,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
             ]
 
             # find the index of the best fitness score
-            if scoring_prop == "polar":
-                best_index = np.argmax(scores)
-            else:
-                best_index = np.argmin(scores)
+            best_index = np.argmax(scores) if maximize else np.argmin(scores)
 
             best_individual = individuals[best_index]
             parent = ranked_population[best_individual]
@@ -401,10 +420,7 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
             scores = [ranked_scores[individual_1], ranked_scores[individual_2]]
 
             # find the index of the best fitness score
-            if scoring_prop == "polar":
-                best_index = np.argmax(scores)
-            else:
-                best_index = np.argmin(scores)
+            best_index = np.argmax(scores) if maximize else np.argmin(scores)
 
             best_individual = individuals[best_index]
             parent = ranked_population[best_individual]
@@ -421,21 +437,8 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
         # bottom limit
         limit = 0
 
-        if scoring_prop == "opt_bg":
-            inversed_scores = [1 / x for x in ranked_scores]
-            total = sum(inversed_scores)
-
-            for x in range(len(inversed_scores)):
-                # fitness proportion
-                fitness = inversed_scores[x] / total
-                # appends the bottom and top limits of the pie, the score, and the polymer
-                wheel.append(
-                    (limit, limit + fitness, inversed_scores[x], ranked_population[x])
-                )
-                limit += fitness
-
-        elif scoring_prop == "polar":
-            # sum of scores
+        if maximize:
+            # higher score = bigger slice
             total = sum(ranked_scores)
             for x in range(len(ranked_scores)):
                 # fitness proportion
@@ -447,9 +450,17 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
                 limit += fitness
 
         else:
-            print(
-                "selection method does not work with negative numbers (solvation ratios)"
-            )
+            # lower score = bigger slice
+            inversed_scores = [1 / x for x in ranked_scores]
+            total = sum(inversed_scores)
+            for x in range(len(inversed_scores)):
+                # fitness proportion
+                fitness = inversed_scores[x] / total
+                # appends the bottom and top limits of the pie, the score, and the polymer
+                wheel.append(
+                    (limit, limit + fitness, inversed_scores[x], ranked_population[x])
+                )
+                limit += fitness
 
         # random number between 0 and 1
         r = random.random()
@@ -469,21 +480,8 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
         # bottom limit
         limit = 0
 
-        if scoring_prop == "opt_bg":
-            inversed_scores = [1 / x for x in ranked_scores]
-            total = sum(inversed_scores)
-
-            for x in range(len(inversed_scores)):
-                # fitness proportion
-                fitness = inversed_scores[x] / total
-                # appends the bottom and top limits of the pie, the score, and the polymer
-                wheel.append(
-                    (limit, limit + fitness, inversed_scores[x], ranked_population[x])
-                )
-                limit += fitness
-
-        elif scoring_prop == "polar":
-            # sum of scores
+        if maximize:
+            # higher score = bigger slice
             total = sum(ranked_scores)
             for x in range(len(ranked_scores)):
                 # fitness proportion
@@ -495,9 +493,17 @@ def parent_select(ranked_population, ranked_scores, selection_method, scoring_pr
                 limit += fitness
 
         else:
-            print(
-                "selection method does not work with negative numbers (solvation ratios)"
-            )
+            # lower score = bigger slice
+            inversed_scores = [1 / x for x in ranked_scores]
+            total = sum(inversed_scores)
+            for x in range(len(inversed_scores)):
+                # fitness proportion
+                fitness = inversed_scores[x] / total
+                # appends the bottom and top limits of the pie, the score, and the polymer
+                wheel.append(
+                    (limit, limit + fitness, inversed_scores[x], ranked_population[x])
+                )
+                limit += fitness
 
         # separation between selected points on wheel
         stepSize = 0.5
@@ -554,6 +560,7 @@ def select_crossover_mutate(
     scoring_prop,
     pop_size,
     unit_list,
+    maximize,
 ):
     """
     Perform selection, crossover, and mutation operations
@@ -592,7 +599,7 @@ def select_crossover_mutate(
 
         # select two parents
         parents = parent_select(
-            ranked_population, ranked_scores, selection_method, scoring_prop
+            ranked_population, ranked_scores, selection_method, scoring_prop, maximize
         )
 
         # create hybrid child
@@ -664,7 +671,10 @@ def init_gen(
     run_name,
     scoring_prop,
     unit_list,
-    model,
+    checkpoint_dirs,
+    ref_features_row,
+    ref_features_cols,
+    maximize,
 ):
     """
     Create initial population
@@ -722,12 +732,14 @@ def init_gen(
         full_writer = csv.writer(full)
         full_writer.writerow(["gen", "individual", "score"])
 
-    fitness_list = scoring.fitness_function(population, model, unit_list)
+    fitness_list = scoring.fitness_function(
+        population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize
+    )
 
-    min_score = fitness_list[0][0]
     median = int((len(fitness_list[0]) - 1) / 2)
+    min_score = min(fitness_list[0])
     med_score = fitness_list[0][median]
-    max_score = fitness_list[0][-1]
+    max_score = max(fitness_list[0])
 
     quick_filename = "../quick_files/quick_analysis_" + run_name + ".csv"
     with open(quick_filename, mode="a+") as quick_file:
@@ -753,7 +765,10 @@ def init_gen(
         elitism_perc,
         run_name,
         scoring_prop,
-        model,
+        checkpoint_dirs,
+        ref_features_row,
+        ref_features_cols,
+        maximize,
     ]
 
     return params
@@ -772,9 +787,33 @@ if __name__ == "__main__":
     parser.add_argument("chem_property", action="store", type=str)
     # 'A', 'B', 'C', 'D', or 'E'
     parser.add_argument("run_label", action="store", type=str)
-    # path to a saved PyTorch model file
-    parser.add_argument("model_path", action="store", type=str)
+    # path to all_data_extra_x.csv used to compute the reference formulation features
+    parser.add_argument("features_ref_path", action="store", type=str)
+    # one or more chemprop v1 checkpoint directories (trained_model_checkpoints/), one per CV fold
+    parser.add_argument("checkpoint_dirs", nargs="+", type=str)
+    # optional: number of generations (default 500; use a small value for test runs)
+    parser.add_argument("--n_generations", type=int, default=500)
+    # component building-block CSV files (must each have a 'smiles' column)
+    parser.add_argument("--aldehydes", required=True, type=str)
+    parser.add_argument("--acids", required=True, type=str)
+    parser.add_argument("--amines", required=True, type=str)
+    parser.add_argument("--isocyanides", required=True, type=str)
+    # optimize for higher predicted values instead of lower
+    parser.add_argument("--maximize", action="store_true")
 
     args = parser.parse_args()
 
-    main(args.parameter_type, args.parameter, args.chem_property, args.run_label, args.model_path)
+    main(
+        args.parameter_type,
+        args.parameter,
+        args.chem_property,
+        args.run_label,
+        args.checkpoint_dirs,
+        args.features_ref_path,
+        args.n_generations,
+        args.aldehydes,
+        args.acids,
+        args.amines,
+        args.isocyanides,
+        args.maximize,
+    )

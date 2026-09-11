@@ -2,7 +2,10 @@ from rdkit import Chem
 
 iso_smarts = Chem.MolFromSmarts("[N]#[C;D1]")
 primary_amine_smarts = Chem.MolFromSmarts("[NX3;H2][#6]")
-ald_smarts = Chem.MolFromSmarts("[CX3H1](=O)")
+# Ugi's carbonyl component is an aldehyde (1 H on the carbonyl C) or a ketone
+# (0 H, two carbon substituents). Requiring two carbons on the ketone branch keeps
+# acids, esters and amides out.
+carbonyl_smarts = Chem.MolFromSmarts("[CX3;H1,$([CX3H0]([#6])[#6])]=O")
 carboxy_smarts = Chem.MolFromSmarts("[CX3](=O)[OX2H1]")
 
 
@@ -91,9 +94,10 @@ def _prepare_amine(amine):
     return amine
 
 
-def _prepare_aldehyde(aldehyde):
-    """Drop the carbonyl O; flag the (former carbonyl) C for bonding."""
-    match = _unique_match(aldehyde, ald_smarts, "aldehyde")
+def _prepare_carbonyl(aldehyde):
+    """Drop the carbonyl O; flag the (former carbonyl) C for bonding.
+    Works for both aldehydes and ketones."""
+    match = _unique_match(aldehyde, carbonyl_smarts, "carbonyl (aldehyde or ketone)")
     if match is None:
         return None
     C_ald = O_ald = None
@@ -139,7 +143,7 @@ def _prepare_isocyanide(isocyanide):
 def get_ugi_product(primary_amine, carboxylic_acid, aldehyde, isocyanide):
     acid = _prepare_acid(smiles_to_mol(carboxylic_acid))
     amine = _prepare_amine(smiles_to_mol(primary_amine))
-    ald = _prepare_aldehyde(smiles_to_mol(aldehyde))
+    ald = _prepare_carbonyl(smiles_to_mol(aldehyde))
     iso = _prepare_isocyanide(smiles_to_mol(isocyanide))
     if None in (acid, amine, ald, iso):
         return

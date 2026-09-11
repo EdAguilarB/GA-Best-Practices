@@ -14,16 +14,12 @@ from ugi_reaction import get_ugi_product
 #     return units
 
 
-def make_unit_list():
+def make_unit_list(aldehydes, acids, amines, isocyanides):
     return {
-        "aldehyde": pd.read_csv("aldehydes.csv", usecols=["smiles"], index_col=False),
-        "acid": pd.read_csv(
-            "carboxylic_acids.csv", usecols=["smiles"], index_col=False
-        ),
-        "amine": pd.read_csv("amines.csv", usecols=["smiles"], index_col=False),
-        "isocyanide": pd.read_csv(
-            "isocyanides.csv", usecols=["smiles"], index_col=False
-        ),
+        "aldehyde":   pd.read_csv(aldehydes,   usecols=["smiles"], index_col=False),
+        "acid":       pd.read_csv(acids,        usecols=["smiles"], index_col=False),
+        "amine":      pd.read_csv(amines,       usecols=["smiles"], index_col=False),
+        "isocyanide": pd.read_csv(isocyanides,  usecols=["smiles"], index_col=False),
     }
 
 
@@ -54,10 +50,10 @@ def make_file_name(polymer):
 
 
 def make_molecule(polymer, unit_list):
-    ald = unit_list["aldehyde"].iloc[polymer[0]][0]
-    acid = unit_list["acid"].iloc[polymer[1]][0]
-    amine = unit_list["amine"].iloc[polymer[2]][0]
-    iso = unit_list["isocyanide"].iloc[polymer[3]][0]
+    ald = unit_list["aldehyde"].iloc[polymer[0], 0]
+    acid = unit_list["acid"].iloc[polymer[1], 0]
+    amine = unit_list["amine"].iloc[polymer[2], 0]
+    iso = unit_list["isocyanide"].iloc[polymer[3], 0]
     return get_ugi_product(
         primary_amine=amine, carboxylic_acid=acid, aldehyde=ald, isocyanide=iso
     )

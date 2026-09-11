@@ -2,10 +2,10 @@ import numpy as np
 import pandas as pd
 import utils
 import gzip
-import torch
+import os
+import subprocess
+import tempfile
 from rdkit import Chem
-from chemprop.data import build_dataloader
-from chemprop_graph import ChempropGraphBuilder
 
 def parse_GFN2(filename):
     """
@@ -188,23 +188,63 @@ def solvation(filename):
     return solvation_energy
 
 
-def fitness_function(population, model, unit_list):
+def compute_reference_row(extra_x_path):
+    """
+    Compute per-column means across all training data.
+    Returns (row_values, col_names) to use as a fixed reference condition
+    when scoring new molecules whose non-SMILES formulation features are unknown.
+    """
+    df = pd.read_csv(extra_x_path)
+    return df.mean().tolist(), list(df.columns)
+
+
+def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize):
+    """
+    Score a population using an ensemble of ChemProp v1 models via the CLI.
+    Each molecule is evaluated under the fixed reference formulation conditions.
+    Returns [ranked_scores, ranked_population] ordered best-first, where "best"
+    is the highest score when maximize is True and the lowest when it is False.
+    """
     smiles_list = [Chem.MolToSmiles(utils.make_molecule(p, unit_list)) for p in population]
-    df = pd.DataFrame({"smiles": smiles_list})
-    dataset = ChempropGraphBuilder().build(df, smiles_cols=["smiles"])
-    loader = build_dataloader(dataset, shuffle=False)
 
-    score_list = []
-    model.eval()
-    with torch.no_grad():
-        for batch in loader:
-            preds = model(batch)
-            scores = preds.squeeze().tolist()
-            if isinstance(scores, float):
-                scores = [scores]
-            score_list.extend(scores)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Population SMILES — column name must match what the models were trained on
+        smiles_path = os.path.join(tmpdir, "population.csv")
+        pd.DataFrame({"IL_SMILES": smiles_list}).to_csv(smiles_path, index=False)
 
+        # Reference formulation features — one row per molecule, same values for all
+        features_path = os.path.join(tmpdir, "features.csv")
+        pd.DataFrame(
+            [ref_features_row] * len(smiles_list), columns=ref_features_cols
+        ).to_csv(features_path, index=False)
+
+        all_preds = []
+        for i, ckpt_dir in enumerate(checkpoint_dirs):
+            print(f"  Scoring with model {i+1}/{len(checkpoint_dirs)}...", flush=True)
+            preds_path = os.path.join(tmpdir, f"preds_{i}.csv")
+            result = subprocess.run(
+                [
+                    "chemprop_predict",
+                    "--checkpoint_dir", ckpt_dir,
+                    "--test_path", smiles_path,
+                    "--features_path", features_path,
+                    "--preds_path", preds_path,
+                    # chemprop's default of 8 DataLoader workers deadlocks on macOS
+                    "--num_workers", "0",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"chemprop_predict failed for {ckpt_dir}:\n{result.stderr}"
+                )
+            all_preds.append(pd.read_csv(preds_path)["Experiment_value"].tolist())
+
+    score_list = list(np.mean(all_preds, axis=0))
     ranked_indices = list(np.argsort(score_list))
+    if maximize:
+        ranked_indices.reverse()
     ranked_score = [score_list[i] for i in ranked_indices]
     ranked_pop = [population[i] for i in ranked_indices]
     return [ranked_score, ranked_pop]
