@@ -115,33 +115,42 @@ def rank_binSearch(wheel, num):
         return rank_binSearch(wheel[:mid], num)
 
 
-# note: population is list of lists [[mono1,mono2], [mono1,mono2], ...]
-def get_monomer_freq(population, mono_df, gen):
-
-    # create new freq column of 0's
-    new_col = "freq_%d" % gen
-    old_col = "freq_%d" % (gen - 1)
-    mono_df[new_col] = mono_df[old_col].copy()
-
-    # loop through population and count monomer frequency
-    for polymer in population:
-        for monomer in polymer:
-            mono_df.loc[monomer, new_col] = mono_df.loc[monomer, new_col] + 1
-
-    return mono_df
+# Building blocks are identified across all four slots in one integer namespace.
+# The stride exceeds every library size, so an aldehyde index cannot collide with
+# an acid index carrying the same number.
+_SLOT_STRIDE = 10_000_000
 
 
-def get_ranked_idx(mono_df, gen):
+def update_block_freq(population, freq):
+    """
+    Accumulate how often each building block has been used, over the whole run.
 
-    col = "freq_%d" % gen
+    freq maps block id -> times used. Only blocks actually drawn are stored, so
+    this stays small even though the libraries hold hundreds of thousands of rows.
+    """
+    for genome in population:
+        for slot, idx in enumerate(genome):
+            uid = slot * _SLOT_STRIDE + idx
+            freq[uid] = freq.get(uid, 0) + 1
+    return freq
 
-    ranked_idx = mono_df[col].copy()
-    ranked_idx = ranked_idx.sort_values(ascending=False)
 
-    # get ranked indexes as ndarray
-    ranked_idx = ranked_idx.index.to_numpy()
+def top_ranked_blocks(freq, n=10, min_count=2):
+    """
+    The n most-used building blocks, most-used first.
 
-    return ranked_idx
+    Blocks drawn only once are ignored. With libraries this large most blocks are
+    singletons, and including them would make the leaderboard a tie broken on id
+    alone -- which looks perfectly stable while the population is in fact still
+    churning, reporting convergence that has not happened.
+
+    Ties among the survivors break on block id so the ordering is reproducible
+    between generations; otherwise equally-used blocks could swap places and look
+    like real churn.
+    """
+    qualifying = ((uid, c) for uid, c in freq.items() if c >= min_count)
+    ordered = sorted(qualifying, key=lambda kv: (-kv[1], kv[0]))
+    return [uid for uid, _ in ordered[:n]]
 
 
 def not_valid(temp_child, unit_list):

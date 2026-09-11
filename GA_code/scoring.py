@@ -202,8 +202,10 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
     """
     Score a population using an ensemble of ChemProp v1 models via the CLI.
     Each molecule is evaluated under the fixed reference formulation conditions.
-    Returns [ranked_scores, ranked_population] ordered best-first, where "best"
-    is the highest score when maximize is True and the lowest when it is False.
+    Returns [ranked_scores, ranked_population, ranked_stds] ordered best-first,
+    where "best" is the highest score when maximize is True and the lowest when
+    it is False. The std is the spread across the ensemble for that molecule:
+    a large value means the models disagree about it.
     """
     smiles_list = [Chem.MolToSmiles(utils.make_molecule(p, unit_list)) for p in population]
 
@@ -241,13 +243,17 @@ def fitness_function(population, checkpoint_dirs, unit_list, ref_features_row, r
                 )
             all_preds.append(pd.read_csv(preds_path)["Experiment_value"].tolist())
 
-    score_list = list(np.mean(all_preds, axis=0))
+    all_preds = np.array(all_preds)
+    score_list = list(all_preds.mean(axis=0))
+    std_list = list(all_preds.std(axis=0))
+
     ranked_indices = list(np.argsort(score_list))
     if maximize:
         ranked_indices.reverse()
     ranked_score = [score_list[i] for i in ranked_indices]
     ranked_pop = [population[i] for i in ranked_indices]
-    return [ranked_score, ranked_pop]
+    ranked_std = [std_list[i] for i in ranked_indices]
+    return [ranked_score, ranked_pop, ranked_std]
 
 
 def fitness_individual(polymer, scoring_prop):

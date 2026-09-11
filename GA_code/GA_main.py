@@ -1,18 +1,21 @@
 # Imports
+import ast
 import csv
+import os
 import random
+import time
 import numpy as np
 from copy import deepcopy
 import pickle
 import argparse
+from rdkit import Chem
+from scipy.stats import spearmanr
 
 import utils
 import scoring
 
 
 def main(
-    parameter_type,
-    parameter,
     chem_property,
     run_label,
     checkpoint_dirs,
@@ -23,6 +26,13 @@ def main(
     amines=None,
     isocyanides=None,
     maximize=False,
+    output_dir=".",
+    pop_size=32,
+    selection_method="tournament_3",
+    mutation_rate=0.4,
+    elitism_perc=0.5,
+    spear_thresh=0.8,
+    conv_gen=50,
 ):
     # reuse initial state — set to "y" to replay from a saved randstate file
     initial_restart = "n"
@@ -31,54 +41,11 @@ def main(
     # Run number (for use with same initial states), can be A, B, C, D, or E
     # run_label = 'D'
 
-    # scoring property. Can be 'polar', 'opt_bg', or 'solv_eng'
-    # scoring_prop = 'polar'
+    # scoring property, retained only as a label in output filenames
+    scoring_prop = chem_property
 
-    if parameter_type == "pop_size":
-        # number of polymers in population, can be 16, 32, 48, 64, 80, 96
-        pop_size = int(parameter)
-
-        selection_method = "random"
-        mutation_rate = 0.4
-        elitism_perc = 0.5
-
-    elif parameter_type == "selection_method":
-        # selection method. Can be 'random', 'tournament_2', 'tournament_3', 'tournament_4', 'roulette', 'rank', 'SUS'
-        selection_method = parameter
-
-        pop_size = 32
-        mutation_rate = 0.4
-        elitism_perc = 0.5
-
-    elif parameter_type == "mutation_rate":
-        # mutation rate. Can be 0.1-0.9, in increments of 0.1
-        mutation_rate = float(parameter)
-
-        pop_size = 32
-        selection_method = "random"
-        elitism_perc = 0.5
-
-        parameter = int(mutation_rate * 100)
-
-    elif parameter_type == "elitism_perc":
-        # elitism percentage. Percentage of top candidates to pass on to next generation. Can be 0, 0.25, 0.5
-        elitism_perc = float(parameter)
-
-        pop_size = 32
-        selection_method = "random"
-        mutation_rate = 0.4
-
-        parameter = int(elitism_perc * 100)
-
-    else:
-        print("not a valid parameter type")
-
-    # Number of generations to run (overridable via --n_generations CLI flag)
-
-    # GA run file name, with the format of "parameter_changed parameter_value fitness_property run_label(ABCDE)"
-    run_name = (
-        parameter_type + "_" + str(parameter) + "_" + chem_property + "_" + run_label
-    )
+    # GA run file name, encoding the hyperparameters actually used
+    run_name = "%s_%s_%s" % (selection_method, chem_property, run_label)
 
     # Pre-compute reference formulation features once (mean of each column across all training data)
     print("Loading reference features...", flush=True)
@@ -89,22 +56,32 @@ def main(
     unit_list = utils.make_unit_list(aldehydes, acids, amines, isocyanides)
     print("Done loading. Starting GA...", flush=True)
 
+    # every artifact from this run lands here
+    os.makedirs(output_dir, exist_ok=True)
+    last_gen_path = os.path.join(output_dir, "last_gen_" + run_name + ".p")
+    randstate_path = os.path.join(output_dir, "randstate_" + run_name + ".p")
+    initial_randstate = os.path.join(
+        output_dir, "initial_randstate_" + run_label + ".p"
+    )
+
     if restart == "y":
         # reload parameters and random state from restart file
-        last_gen_filename = "../last_gen_params/last_gen_" + run_name + ".p"
+        last_gen_filename = last_gen_path
         open_params = open(last_gen_filename, "rb")
         params = pickle.load(open_params)
         open_params.close()
 
         # inject runtime values (not stored in pickle; always loaded fresh from CLI args)
-        while len(params) < 13:
+        while len(params) < 18:
             params.append(None)
         params[9] = checkpoint_dirs
         params[10] = ref_features_row
         params[11] = ref_features_cols
         params[12] = maximize
+        params[13] = output_dir
+        params[16] = spear_thresh
 
-        randstate_filename = "../rand_states/randstate_" + run_name + ".p"
+        randstate_filename = randstate_path
         open_rand = open(randstate_filename, "rb")
         randstate = pickle.load(open_rand)
         random.setstate(randstate)
@@ -114,17 +91,11 @@ def main(
         if initial_restart == "n":
             # sets initial state
             randstate = random.getstate()
-            initial_randstate = (
-                "../initial_randstates/initial_randstate_" + run_label + ".p"
-            )
             rand_file = open(initial_randstate, "wb")
             pickle.dump(randstate, rand_file)
             rand_file.close()
         else:
             # re-opens saved initial state for exact reproducibility
-            initial_randstate = (
-                "../initial_randstates/initial_randstate_" + run_label + ".p"
-            )
             open_rand = open(initial_randstate, "rb")
             randstate = pickle.load(open_rand)
             random.setstate(randstate)
@@ -143,37 +114,117 @@ def main(
             ref_features_row,
             ref_features_cols,
             maximize,
+            output_dir,
+            spear_thresh,
         )
 
         # pickle parameters needed for restart
-        last_gen_filename = "../last_gen_params/last_gen_" + run_name + ".p"
-        params_file = open(last_gen_filename, "wb")
+        params_file = open(last_gen_path, "wb")
         pickle.dump(params, params_file)
         params_file.close()
 
         # pickle random state for restart
         randstate = random.getstate()
-        randstate_filename = "../rand_states/randstate_" + run_name + ".p"
-        rand_file = open(randstate_filename, "wb")
+        rand_file = open(randstate_path, "wb")
         pickle.dump(randstate, rand_file)
         rand_file.close()
 
-    for _ in range(n_generations):
+    started = time.time()
+    for completed in range(1, n_generations + 1):
         # run next generation of GA
         params = next_gen(params)
 
         # pickle parameters needed for restart
-        last_gen_filename = "../last_gen_params/last_gen_" + run_name + ".p"
-        params_file = open(last_gen_filename, "wb")
+        params_file = open(last_gen_path, "wb")
         pickle.dump(params, params_file)
         params_file.close()
 
         # pickle random state for restart
         randstate = random.getstate()
-        randstate_filename = "../rand_states/randstate" + run_name + ".p"
-        rand_file = open(randstate_filename, "wb")
+        rand_file = open(randstate_path, "wb")
         pickle.dump(randstate, rand_file)
         rand_file.close()
+
+        # progress: the run ends at whichever comes first, the generation cap or
+        # convergence, so report position against both.
+        scores = params[3][0]
+        per_gen = (time.time() - started) / completed
+        eta = per_gen * (n_generations - completed)
+        print(
+            f"[gen {params[2]:>4}/{n_generations + 1}] "
+            f"best {scores[0]:>8.4f}  med {scores[len(scores) // 2]:>8.4f}  |  "
+            f"spearman {params[17]:>5.2f}  converge {params[15]:>3}/{conv_gen}  |  "
+            f"{per_gen / 60:.1f} min/gen  elapsed {(time.time() - started) / 60:.0f}m  "
+            f"cap eta {eta / 60:.0f}m",
+            flush=True,
+        )
+
+        if params[15] >= conv_gen:
+            print(
+                f"Converged at generation {params[2]}: Spearman > {spear_thresh} "
+                f"for {conv_gen} consecutive generations",
+                flush=True,
+            )
+            break
+
+    summary_path, n_unique = write_summary(output_dir, run_name, unit_list, maximize)
+    print(f"Wrote {n_unique} unique candidates to {summary_path}", flush=True)
+
+
+def write_summary(output_dir, run_name, unit_list, maximize):
+    """
+    Collapse every candidate scored during the run into one ranked table.
+
+    Reads back the per-generation log rather than tracking in memory, so a run
+    resumed from a restart file still reports everything it has ever scored.
+    Scoring is deterministic, so a genome seen in several generations carries
+    the same score each time and collapses to a single row.
+    """
+    full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
+
+    by_genome = {}
+    with open(full_filename, newline="") as full_file:
+        for row in csv.DictReader(full_file):
+            by_genome[row["individual"]] = (
+                float(row["score"]),
+                float(row["score_std"]),
+            )
+
+    ranked = sorted(by_genome.items(), key=lambda kv: kv[1][0], reverse=maximize)
+
+    summary_filename = os.path.join(output_dir, "summary_" + run_name + ".csv")
+    with open(summary_filename, mode="w+", newline="") as summary_file:
+        writer = csv.writer(summary_file)
+        writer.writerow(
+            [
+                "rank",
+                "score",
+                "score_std",
+                "individual",
+                "carbonyl_smiles",
+                "acid_smiles",
+                "amine_smiles",
+                "isocyanide_smiles",
+                "product_smiles",
+            ]
+        )
+        for rank, (genome, (score, score_std)) in enumerate(ranked, start=1):
+            poly = ast.literal_eval(genome)
+            writer.writerow(
+                [
+                    rank,
+                    score,
+                    score_std,
+                    genome,
+                    unit_list["aldehyde"].iloc[poly[0], 0],
+                    unit_list["acid"].iloc[poly[1], 0],
+                    unit_list["amine"].iloc[poly[2], 0],
+                    unit_list["isocyanide"].iloc[poly[3], 0],
+                    Chem.MolToSmiles(utils.make_molecule(poly, unit_list)),
+                ]
+            )
+
+    return summary_filename, len(ranked)
 
 
 def next_gen(params):
@@ -205,6 +256,10 @@ def next_gen(params):
     ref_features_row = params[10]
     ref_features_cols = params[11]
     maximize = params[12]
+    output_dir = params[13]
+    block_freq = params[14]
+    spear_counter = params[15]
+    spear_thresh = params[16]
 
     gen_counter += 1
     ranked_population = fitness_list[1]
@@ -235,19 +290,42 @@ def next_gen(params):
     med_score = fitness_list[0][median]
     max_score = max(fitness_list[0])
 
-    quick_filename = "../quick_files/quick_analysis_" + run_name + ".csv"
+    # Convergence: compare which building blocks the population favours now
+    # against the previous generation. Once that leaderboard stops reshuffling
+    # for conv_gen generations in a row, the search has settled.
+    old_ranks = utils.top_ranked_blocks(block_freq)
+    block_freq = utils.update_block_freq(new_population, block_freq)
+    new_ranks = utils.top_ranked_blocks(block_freq)
+
+    if len(old_ranks) < 10 or len(new_ranks) < 10:
+        # too few distinct blocks seen yet for the comparison to mean anything
+        spear = 0.0
+    else:
+        spear = spearmanr(old_ranks, new_ranks)[0]
+        if np.isnan(spear):
+            spear = 0.0
+
+    if spear > spear_thresh:
+        spear_counter += 1
+    else:
+        spear_counter = 0
+
+    quick_filename = os.path.join(output_dir, "quick_analysis_" + run_name + ".csv")
     with open(quick_filename, mode="a+") as quick_file:
         quick_writer = csv.writer(quick_file)
-        quick_writer.writerow([gen_counter, min_score, med_score, max_score])
+        quick_writer.writerow(
+            [gen_counter, min_score, med_score, max_score, spear, spear_counter]
+        )
 
     for x in range(len(fitness_list[0])):
         poly = fitness_list[1][x]
         score = fitness_list[0][x]
+        score_std = fitness_list[2][x]
 
-        full_filename = "../full_files/full_analysis_" + run_name + ".csv"
+        full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
         with open(full_filename, mode="a+") as full_file:
             full_writer = csv.writer(full_file)
-            full_writer.writerow([gen_counter, poly, score])
+            full_writer.writerow([gen_counter, poly, score, score_std])
 
     params = [
         pop_size,
@@ -263,6 +341,11 @@ def next_gen(params):
         ref_features_row,
         ref_features_cols,
         maximize,
+        output_dir,
+        block_freq,
+        spear_counter,
+        spear_thresh,
+        spear,
     ]
 
     return params
@@ -675,6 +758,8 @@ def init_gen(
     ref_features_row,
     ref_features_cols,
     maximize,
+    output_dir,
+    spear_thresh,
 ):
     """
     Create initial population
@@ -722,15 +807,17 @@ def init_gen(
             population.append(temp_poly)
 
     # create new analysis files
-    quick_filename = "../quick_files/quick_analysis_" + run_name + ".csv"
+    quick_filename = os.path.join(output_dir, "quick_analysis_" + run_name + ".csv")
     with open(quick_filename, mode="w+") as quick:
         quick_writer = csv.writer(quick)
-        quick_writer.writerow(["gen", "min_score", "med_score", "max_score"])
+        quick_writer.writerow(
+            ["gen", "min_score", "med_score", "max_score", "spearman", "spear_counter"]
+        )
 
-    full_filename = "../full_files/full_analysis_" + run_name + ".csv"
+    full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
     with open(full_filename, mode="w+") as full:
         full_writer = csv.writer(full)
-        full_writer.writerow(["gen", "individual", "score"])
+        full_writer.writerow(["gen", "individual", "score", "score_std"])
 
     fitness_list = scoring.fitness_function(
         population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize
@@ -741,19 +828,20 @@ def init_gen(
     med_score = fitness_list[0][median]
     max_score = max(fitness_list[0])
 
-    quick_filename = "../quick_files/quick_analysis_" + run_name + ".csv"
+    quick_filename = os.path.join(output_dir, "quick_analysis_" + run_name + ".csv")
     with open(quick_filename, mode="a+") as quick_file:
         quick_writer = csv.writer(quick_file)
-        quick_writer.writerow([1, min_score, med_score, max_score])
+        quick_writer.writerow([1, min_score, med_score, max_score, 0.0, 0])
 
     for x in range(len(fitness_list[0])):
         poly = fitness_list[1][x]
         score = fitness_list[0][x]
+        score_std = fitness_list[2][x]
 
-        full_filename = "../full_files/full_analysis_" + run_name + ".csv"
+        full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
         with open(full_filename, mode="a+") as full_file:
             full_writer = csv.writer(full_file)
-            full_writer.writerow([gen_counter, poly, score])
+            full_writer.writerow([gen_counter, poly, score, score_std])
 
     params = [
         pop_size,
@@ -769,6 +857,11 @@ def init_gen(
         ref_features_row,
         ref_features_cols,
         maximize,
+        output_dir,
+        utils.update_block_freq(population, {}),
+        0,
+        spear_thresh,
+        0.0,
     ]
 
     return params
@@ -779,11 +872,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(usage)
 
     # sets input arguments
-    # parameter type = 'pop_size', 'selection_method', 'mutation_rate', or 'elitism_perc'
-    parser.add_argument("parameter_type", action="store", type=str)
-    # the value to change the paraemter type to
-    parser.add_argument("parameter", action="store", type=str)
-    # 'polar', 'opt_bg', or 'solv_eng' — controls optimization direction in selection methods
+    # free-text label for this run, used in output filenames
     parser.add_argument("chem_property", action="store", type=str)
     # 'A', 'B', 'C', 'D', or 'E'
     parser.add_argument("run_label", action="store", type=str)
@@ -800,12 +889,36 @@ if __name__ == "__main__":
     parser.add_argument("--isocyanides", required=True, type=str)
     # optimize for higher predicted values instead of lower
     parser.add_argument("--maximize", action="store_true")
+    # directory to write every artifact of this run into (created if absent)
+    parser.add_argument("--output_dir", required=True, type=str)
+
+    # GA hyperparameters. Defaults are the best-practice values from
+    # J. Chem. Phys. 159, 091501 (2023), and can now be set independently.
+    parser.add_argument("--pop_size", type=int, default=32)
+    parser.add_argument(
+        "--selection_method",
+        type=str,
+        default="tournament_3",
+        choices=[
+            "random",
+            "random_top50",
+            "tournament_2",
+            "tournament_3",
+            "tournament_4",
+            "roulette",
+            "rank",
+            "SUS",
+        ],
+    )
+    parser.add_argument("--mutation_rate", type=float, default=0.4)
+    parser.add_argument("--elitism_perc", type=float, default=0.5)
+    # self-termination: stop once the favoured building blocks stop reshuffling
+    parser.add_argument("--spear_thresh", type=float, default=0.8)
+    parser.add_argument("--conv_gen", type=int, default=50)
 
     args = parser.parse_args()
 
     main(
-        args.parameter_type,
-        args.parameter,
         args.chem_property,
         args.run_label,
         args.checkpoint_dirs,
@@ -816,4 +929,11 @@ if __name__ == "__main__":
         args.amines,
         args.isocyanides,
         args.maximize,
+        args.output_dir,
+        args.pop_size,
+        args.selection_method,
+        args.mutation_rate,
+        args.elitism_perc,
+        args.spear_thresh,
+        args.conv_gen,
     )
