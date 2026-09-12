@@ -4,7 +4,8 @@
 # J. Chem. Phys. 159, 091501 (2023), with a larger population since scoring
 # cost here is near-independent of population size.
 #
-#   bash run_GA.sh A                          # production run, label A
+#   bash run_GA.sh A                          # production run, label A (Ugi 4-component)
+#   bash run_GA.sh A3 --mode 3C               # 3-component variant, no acid slot
 #   bash run_GA.sh SMOKE --pop_size 8 --n_generations 3 --conv_gen 3
 #   nohup bash run_GA.sh A > /dev/null 2>&1 & # detached on a remote
 #

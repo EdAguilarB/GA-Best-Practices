@@ -14,13 +14,25 @@ from ugi_reaction import get_ugi_product
 #     return units
 
 
-def make_unit_list(aldehydes, acids, amines, isocyanides):
-    return {
-        "aldehyde": pd.read_csv(aldehydes, usecols=["smiles"], index_col=False),
-        "acid": pd.read_csv(acids, usecols=["smiles"], index_col=False),
-        "amine": pd.read_csv(amines, usecols=["smiles"], index_col=False),
-        "isocyanide": pd.read_csv(isocyanides, usecols=["smiles"], index_col=False),
-    }
+def make_unit_list(aldehydes, amines, isocyanides, acids=None):
+    """
+    Load the building-block libraries.
+
+    Key order defines the genome layout: index i of an individual selects from
+    the i-th library here. Omitting acids yields a three-slot genome for the
+    three-component reaction, and everything downstream sizes itself off this
+    dict rather than assuming four.
+    """
+
+    def load(path):
+        return pd.read_csv(path, usecols=["smiles"], index_col=False)
+
+    units = {"aldehyde": load(aldehydes)}
+    if acids is not None:
+        units["acid"] = load(acids)
+    units["amine"] = load(amines)
+    units["isocyanide"] = load(isocyanides)
+    return units
 
 
 def make_file_name(polymer):
@@ -50,11 +62,14 @@ def make_file_name(polymer):
 
 
 def make_molecule(polymer, unit_list):
-    ald = unit_list["aldehyde"].iloc[polymer[0], 0]
-    acid = unit_list["acid"].iloc[polymer[1], 0]
-    amine = unit_list["amine"].iloc[polymer[2], 0]
-    iso = unit_list["isocyanide"].iloc[polymer[3], 0]
-    return get_ugi_product(primary_amine=amine, carboxylic_acid=acid, aldehyde=ald, isocyanide=iso)
+    smiles = {comp: unit_list[comp].iloc[idx, 0] for comp, idx in zip(unit_list, polymer)}
+    return get_ugi_product(
+        primary_amine=smiles["amine"],
+        aldehyde=smiles["aldehyde"],
+        isocyanide=smiles["isocyanide"],
+        # absent for the three-component reaction
+        carboxylic_acid=smiles.get("acid"),
+    )
 
 
 def binSearch(wheel, num):

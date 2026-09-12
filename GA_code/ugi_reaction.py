@@ -73,8 +73,14 @@ def _prepare_acid(acid):
     return acid
 
 
-def _prepare_amine(amine):
-    """Flag the primary-amine N for bonding and clear its hydrogens."""
+def _prepare_amine(amine, keep_hydrogens=0):
+    """Flag the primary-amine N for bonding and fix its hydrogen count.
+
+    The four-component reaction acylates this nitrogen and also bonds it to the
+    carbonyl carbon, so it keeps no hydrogens. Without an acid there is only one
+    new bond to make, and the nitrogen ends up a secondary amine, so one
+    hydrogen has to stay.
+    """
     match = _unique_match(amine, primary_amine_smarts, "primary amine")
     if match is None:
         return None
@@ -82,7 +88,7 @@ def _prepare_amine(amine):
         atom = amine.GetAtomWithIdx(idx)
         if atom.GetSymbol() == "N":
             atom.SetBoolProp("Attach", True)
-            atom.SetNumExplicitHs(0)
+            atom.SetNumExplicitHs(keep_hydrogens)
             atom.SetNoImplicit(True)
             break
     return amine
@@ -134,19 +140,31 @@ def _prepare_isocyanide(isocyanide):
 # ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
-def get_ugi_product(primary_amine, carboxylic_acid, aldehyde, isocyanide):
-    acid = _prepare_acid(smiles_to_mol(carboxylic_acid))
-    amine = _prepare_amine(smiles_to_mol(primary_amine))
+def get_ugi_product(primary_amine, aldehyde, isocyanide, carboxylic_acid=None):
+    """Assemble a Ugi product. Omitting carboxylic_acid runs the
+    three-component variant, which leaves the amine nitrogen secondary rather
+    than acylating it to an amide."""
+    three_component = carboxylic_acid is None
+
+    # Without an acid the nitrogen makes only one new bond, so it must retain a
+    # hydrogen instead of being stripped bare for two.
+    amine = _prepare_amine(smiles_to_mol(primary_amine), keep_hydrogens=int(three_component))
     ald = _prepare_carbonyl(smiles_to_mol(aldehyde))
     iso = _prepare_isocyanide(smiles_to_mol(isocyanide))
-    if None in (acid, amine, ald, iso):
+    acid = None if three_component else _prepare_acid(smiles_to_mol(carboxylic_acid))
+
+    required = (amine, ald, iso) if three_component else (acid, amine, ald, iso)
+    if None in required:
         return
 
-    # Chain the couplings. The amine N is the hub: it first bonds the acid
-    # carbonyl, then the aldehyde carbon; the aldehyde carbon finally bonds
-    # the isocyanide carbon.
-    rw = _join_on_attachments(acid, amine)  # acid C  --  amine N
-    rw = _join_on_attachments(rw, ald)  # amine N --  aldehyde C
+    # Chain the couplings. The amine N is the hub: with an acid it bonds that
+    # carbonyl first, then the aldehyde carbon; the aldehyde carbon finally
+    # bonds the isocyanide carbon.
+    if three_component:
+        rw = _join_on_attachments(amine, ald)  # amine N --  aldehyde C
+    else:
+        rw = _join_on_attachments(acid, amine)  # acid C  --  amine N
+        rw = _join_on_attachments(rw, ald)  # amine N --  aldehyde C
     rw = _join_on_attachments(rw, iso, deactivate_base=False)  # aldehyde C -- isocyanide C
 
     mol = rw.GetMol()
