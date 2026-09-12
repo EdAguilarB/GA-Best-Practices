@@ -14,10 +14,6 @@ import utils
 from rdkit import Chem
 from scipy.stats import spearmanr
 
-# Genome layout: index i of an individual selects from COMPONENT_SLOTS[i]. Coverage
-# reporting decodes block ids by the same order, so keep it the single definition.
-COMPONENT_SLOTS = ["aldehyde", "acid", "amine", "isocyanide"]
-
 
 def main(
     chem_property,
@@ -38,6 +34,7 @@ def main(
     spear_thresh=0.8,
     conv_gen=50,
     n_jobs=1,
+    mode="4C",
 ):
     # reuse initial state — set to "y" to replay from a saved randstate file
     initial_restart = "n"
@@ -47,7 +44,7 @@ def main(
     # run_label = 'D'
 
     # GA run file name, encoding the hyperparameters actually used
-    run_name = "%s_%s_%s" % (selection_method, chem_property, run_label)
+    run_name = "%s_%s_%s_%s" % (mode, selection_method, chem_property, run_label)
 
     # Pre-compute reference formulation features once (mean of each column across all training data)
     print("Loading reference features...", flush=True)
@@ -55,7 +52,10 @@ def main(
 
     # Create list of possible building block unit SMILES in specific format
     print("Loading component CSVs...", flush=True)
-    unit_list = utils.make_unit_list(aldehydes, acids, amines, isocyanides)
+    # mode "3C" drops the acid slot entirely, shortening the genome to three
+    unit_list = utils.make_unit_list(
+        aldehydes, amines, isocyanides, acids=None if mode == "3C" else acids
+    )
     print("Done loading. Starting GA...", flush=True)
 
     # every artifact from this run lands here
@@ -187,14 +187,14 @@ def report_coverage(unit_list, block_freq, n_products):
     used = utils.blocks_used_per_slot(block_freq)
 
     total_products = 1
-    for comp in COMPONENT_SLOTS:
+    for comp in unit_list:
         total_products *= len(unit_list[comp])
 
     print("\nSearch space covered", flush=True)
-    for slot, comp in enumerate(COMPONENT_SLOTS):
+    for slot, comp in enumerate(unit_list):
         library = len(unit_list[comp])
         tried = used.get(slot, 0)
-        label = "carbonyl" if comp == "aldehyde" else comp
+        label = _slot_label(comp)
         print(
             f"  {label:<11}: {tried:>8,} / {library:>11,}  ({_as_pct(tried, library)})",
             flush=True,
@@ -204,6 +204,11 @@ def report_coverage(unit_list, block_freq, n_products):
         f"({_as_pct(n_products, total_products)})",
         flush=True,
     )
+
+
+def _slot_label(comp):
+    """The aldehyde slot also accepts ketones, so report it as the carbonyl."""
+    return "carbonyl" if comp == "aldehyde" else comp
 
 
 def _as_pct(part, whole):
@@ -239,33 +244,18 @@ def write_summary(output_dir, run_name, unit_list, maximize):
     summary_filename = os.path.join(output_dir, "summary_" + run_name + ".csv")
     with open(summary_filename, mode="w+", newline="") as summary_file:
         writer = csv.writer(summary_file)
+        # one component column per genome slot, so the three-component reaction
+        # simply has no acid column rather than an empty one
+        component_columns = [f"{_slot_label(comp)}_smiles" for comp in unit_list]
         writer.writerow(
-            [
-                "rank",
-                "score",
-                "score_std",
-                "individual",
-                "carbonyl_smiles",
-                "acid_smiles",
-                "amine_smiles",
-                "isocyanide_smiles",
-                "product_smiles",
-            ]
+            ["rank", "score", "score_std", "individual"] + component_columns + ["product_smiles"]
         )
         for rank, (genome, (score, score_std)) in enumerate(ranked, start=1):
             poly = ast.literal_eval(genome)
             writer.writerow(
-                [
-                    rank,
-                    score,
-                    score_std,
-                    genome,
-                    unit_list["aldehyde"].iloc[poly[0], 0],
-                    unit_list["acid"].iloc[poly[1], 0],
-                    unit_list["amine"].iloc[poly[2], 0],
-                    unit_list["isocyanide"].iloc[poly[3], 0],
-                    Chem.MolToSmiles(utils.make_molecule(poly, unit_list)),
-                ]
+                [rank, score, score_std, genome]
+                + [unit_list[comp].iloc[idx, 0] for comp, idx in zip(unit_list, poly)]
+                + [Chem.MolToSmiles(utils.make_molecule(poly, unit_list))]
             )
 
     return summary_filename, len(ranked)
@@ -730,7 +720,7 @@ def select_crossover_mutate(
         temp_child = []
 
         # take first unit from parent 1 and second unit from parent 2
-        for i in range(4):
+        for i in range(len(unit_list)):
             source = random.randint(0, 1)
             temp_child.append(parents[source][i])
 
@@ -753,8 +743,8 @@ def mutate(temp_child, unit_list, mut_rate):
     if rand > (mut_rate * 100):
         return temp_child
 
-    point = random.randint(0, 3)  # 0=ald, 1=acid, 2=amine, 3=iso
-    components = COMPONENT_SLOTS
+    components = list(unit_list)
+    point = random.randint(0, len(components) - 1)
     comp = components[point]
     temp_child[point] = random.randint(0, len(unit_list[comp]) - 1)
     return temp_child
@@ -836,7 +826,7 @@ def init_gen(
 
     while len(population) < pop_size:
         temp_poly = []
-        components = COMPONENT_SLOTS
+        components = list(unit_list)
         for comp in components:
             idx = random.randint(0, len(unit_list[comp]) - 1)
             temp_poly.append(idx)
@@ -933,7 +923,8 @@ if __name__ == "__main__":
     parser.add_argument("--n_generations", type=int, default=500)
     # component building-block CSV files (must each have a 'smiles' column)
     parser.add_argument("--aldehydes", required=True, type=str)
-    parser.add_argument("--acids", required=True, type=str)
+    # not needed for --mode 3C, which has no acid slot
+    parser.add_argument("--acids", type=str, default=None)
     parser.add_argument("--amines", required=True, type=str)
     parser.add_argument("--isocyanides", required=True, type=str)
     # optimize for higher predicted values instead of lower
@@ -968,8 +959,13 @@ if __name__ == "__main__":
     # time is interpreter start-up, so this is close to a linear speed-up until
     # it reaches the number of models. Set it to your allocated core count.
     parser.add_argument("--n_jobs", type=int, default=1)
+    # 4C is the classic four-component Ugi; 3C omits the carboxylic acid and
+    # leaves the amine nitrogen secondary instead of acylating it
+    parser.add_argument("--mode", type=str, default="4C", choices=["3C", "4C"])
 
     args = parser.parse_args()
+    if args.mode == "4C" and args.acids is None:
+        parser.error("--acids is required for --mode 4C")
 
     main(
         args.chem_property,
@@ -990,4 +986,5 @@ if __name__ == "__main__":
         args.spear_thresh,
         args.conv_gen,
         args.n_jobs,
+        args.mode,
     )
