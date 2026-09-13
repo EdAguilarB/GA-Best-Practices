@@ -6,6 +6,10 @@
 #
 #   bash run_GA.sh A                          # production run, label A (Ugi 4-component)
 #   bash run_GA.sh A3 --mode 3C               # 3-component variant, no acid slot
+#
+# Add novelty to the objective with (weight is dissimilarity's share):
+#   --reference_smiles LNPDB_v2_delivery.csv --dissimilarity_weight 0.5
+# Without those the GA optimises the prediction alone, as before.
 #   bash run_GA.sh SMOKE --pop_size 8 --n_generations 3 --conv_gen 3
 #   nohup bash run_GA.sh A > /dev/null 2>&1 & # detached on a remote
 #

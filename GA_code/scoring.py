@@ -2,12 +2,96 @@ import gzip
 import os
 import subprocess
 import tempfile
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 import utils
-from rdkit import Chem
+from rdkit import Chem, DataStructs
+from rdkit.Chem import rdFingerprintGenerator
+
+# ECFP4. Built once because constructing a generator per call is wasteful when
+# every candidate in every generation is fingerprinted the same way.
+_MORGAN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+
+# Everything the diversity objective needs: the reference pool to measure
+# novelty against, the bounds that put predictions on the reference's scale,
+# and how much of the combined score dissimilarity accounts for.
+DiversityRef = namedtuple("DiversityRef", "fingerprints pred_min pred_max weight norm_mode")
+
+
+def normalise_predictions(predictions, reference):
+    """
+    Put predictions on [0, 1] so they can be blended with dissimilarity.
+
+    "reference" scales against the bounds of the reference data, which keeps a
+    value comparable across runs but compresses hard: ensemble means regress
+    toward the mean and occupy a fraction of the range the raw data spans.
+
+    "population" min-maxes within the batch being scored, so the spread always
+    fills [0, 1] and the two objectives carry comparable weight. The cost is
+    that a value only means something relative to the batch it came from, which
+    is why the summary recomputes it across every candidate at the end.
+
+    "none" blends the raw prediction straight into the objective. Neither term
+    is rescaled, so each contributes in proportion to how much it actually
+    varies rather than to a range imposed on it -- at the price of the
+    prediction being unbounded and free to leave the [0, 1] dissimilarity sits in.
+    """
+    if reference.norm_mode == "none":
+        return list(predictions)
+
+    if reference.norm_mode == "population":
+        low, high = min(predictions), max(predictions)
+    else:
+        low, high = reference.pred_min, reference.pred_max
+
+    span = high - low
+    if span <= 0:
+        # every candidate identical, so nothing to separate them by
+        return [0.5] * len(predictions)
+    return [min(1.0, max(0.0, (p - low) / span)) for p in predictions]
+
+
+def load_diversity_reference(reference_path, weight, norm_mode="reference"):
+    """
+    Build the reference pool that candidates are measured against for novelty.
+
+    Duplicate SMILES are collapsed: a molecule appearing twice cannot change any
+    candidate's nearest neighbour, and the pool here is roughly half duplicates,
+    so dropping them halves the similarity work every generation.
+
+    Prediction bounds come from the reference's own Experiment_value_normalized
+    column, which puts the model's output on the scale of the data it was
+    trained against.
+    """
+    df = pd.read_csv(reference_path, usecols=["smiles", "Experiment_value_normalized"])
+
+    smiles = df["smiles"].dropna().unique()
+    fingerprints = []
+    for smi in smiles:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is not None:
+            fingerprints.append(_MORGAN.GetFingerprint(mol))
+
+    bounds = df["Experiment_value_normalized"].dropna()
+    return DiversityRef(fingerprints, float(bounds.min()), float(bounds.max()), weight, norm_mode)
+
+
+def nearest_neighbour_dissimilarity(mols, reference):
+    """
+    1 - the Tanimoto similarity to the closest molecule in the reference pool.
+
+    0 means the candidate is already in the pool; 1 means it shares no
+    fingerprint bits with anything there.
+    """
+    scores = []
+    for mol in mols:
+        fp = _MORGAN.GetFingerprint(mol)
+        sims = DataStructs.BulkTanimotoSimilarity(fp, reference.fingerprints)
+        scores.append(1.0 - max(sims))
+    return scores
 
 
 def parse_GFN2(filename):
@@ -202,17 +286,32 @@ def compute_reference_row(extra_x_path):
 
 
 def fitness_function(
-    population, checkpoint_dirs, unit_list, ref_features_row, ref_features_cols, maximize, n_jobs=1
+    population,
+    checkpoint_dirs,
+    unit_list,
+    ref_features_row,
+    ref_features_cols,
+    maximize,
+    n_jobs=1,
+    diversity=None,
 ):
     """
     Score a population using an ensemble of ChemProp v1 models via the CLI.
     Each molecule is evaluated under the fixed reference formulation conditions.
-    Returns [ranked_scores, ranked_population, ranked_stds] ordered best-first,
-    where "best" is the highest score when maximize is True and the lowest when
-    it is False. The std is the spread across the ensemble for that molecule:
-    a large value means the models disagree about it.
+
+    Returns a list ordered best-first, where "best" is the highest score when
+    maximize is True and the lowest when it is False:
+
+        [ranked_objective, population, std, prediction, dissimilarity, norm_prediction]
+
+    Without a diversity reference the objective is the raw ensemble mean and the
+    last two entries mirror it. With one, the objective becomes a weighted blend
+    of the normalised prediction and the candidate's distance from the reference
+    pool, while prediction and std stay untransformed so the raw model output is
+    never lost.
     """
-    smiles_list = [Chem.MolToSmiles(utils.make_molecule(p, unit_list)) for p in population]
+    mols = [utils.make_molecule(p, unit_list) for p in population]
+    smiles_list = [Chem.MolToSmiles(m) for m in mols]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Population SMILES — column name must match what the models were trained on
@@ -268,16 +367,34 @@ def fitness_function(
             all_preds = list(pool.map(predict_with, enumerate(checkpoint_dirs)))
 
     all_preds = np.array(all_preds)
-    score_list = list(all_preds.mean(axis=0))
+    pred_list = list(all_preds.mean(axis=0))
     std_list = list(all_preds.std(axis=0))
 
-    ranked_indices = list(np.argsort(score_list))
+    if diversity is None:
+        objective = pred_list
+        dissim_list = pred_list
+        norm_pred_list = pred_list
+    else:
+        dissim_list = nearest_neighbour_dissimilarity(mols, diversity)
+        norm_pred_list = normalise_predictions(pred_list, diversity)
+        w = diversity.weight
+        objective = [(1.0 - w) * n + w * d for n, d in zip(norm_pred_list, dissim_list)]
+
+    ranked_indices = list(np.argsort(objective))
     if maximize:
         ranked_indices.reverse()
-    ranked_score = [score_list[i] for i in ranked_indices]
-    ranked_pop = [population[i] for i in ranked_indices]
-    ranked_std = [std_list[i] for i in ranked_indices]
-    return [ranked_score, ranked_pop, ranked_std]
+
+    def in_rank_order(values):
+        return [values[i] for i in ranked_indices]
+
+    return [
+        in_rank_order(objective),
+        in_rank_order(population),
+        in_rank_order(std_list),
+        in_rank_order(pred_list),
+        in_rank_order(dissim_list),
+        in_rank_order(norm_pred_list),
+    ]
 
 
 def fitness_individual(polymer, scoring_prop):

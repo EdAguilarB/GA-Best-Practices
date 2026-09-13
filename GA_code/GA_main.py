@@ -35,6 +35,9 @@ def main(
     conv_gen=50,
     n_jobs=1,
     mode="4C",
+    reference_smiles=None,
+    dissimilarity_weight=0.5,
+    normalisation="reference",
 ):
     # reuse initial state — set to "y" to replay from a saved randstate file
     initial_restart = "n"
@@ -56,6 +59,22 @@ def main(
     unit_list = utils.make_unit_list(
         aldehydes, amines, isocyanides, acids=None if mode == "3C" else acids
     )
+
+    # Novelty reference: scored candidates are measured against this pool, so it
+    # is fingerprinted once rather than per generation.
+    diversity = None
+    if reference_smiles is not None:
+        print("Loading diversity reference...", flush=True)
+        diversity = scoring.load_diversity_reference(
+            reference_smiles, dissimilarity_weight, normalisation
+        )
+        print(
+            f"  {len(diversity.fingerprints):,} unique reference molecules; "
+            f"prediction scaled to [{diversity.pred_min:.3f}, {diversity.pred_max:.3f}], "
+            f"dissimilarity weight {dissimilarity_weight}, {normalisation} normalisation",
+            flush=True,
+        )
+
     print("Done loading. Starting GA...", flush=True)
 
     # every artifact from this run lands here
@@ -72,7 +91,7 @@ def main(
         open_params.close()
 
         # inject runtime values (not stored in pickle; always loaded fresh from CLI args)
-        while len(params) < 19:
+        while len(params) < 20:
             params.append(None)
         params[9] = checkpoint_dirs
         params[10] = ref_features_row
@@ -81,6 +100,7 @@ def main(
         params[13] = output_dir
         params[16] = spear_thresh
         params[18] = n_jobs
+        params[19] = diversity
 
         randstate_filename = randstate_path
         open_rand = open(randstate_filename, "rb")
@@ -118,6 +138,7 @@ def main(
             output_dir,
             spear_thresh,
             n_jobs,
+            diversity,
         )
 
         # pickle parameters needed for restart
@@ -169,7 +190,7 @@ def main(
             )
             break
 
-    summary_path, n_unique = write_summary(output_dir, run_name, unit_list, maximize)
+    summary_path, n_unique = write_summary(output_dir, run_name, unit_list, maximize, diversity)
     print(f"Wrote {n_unique} unique candidates to {summary_path}", flush=True)
     report_coverage(unit_list, params[14], n_unique)
 
@@ -220,7 +241,7 @@ def _as_pct(part, whole):
     return f"{pct:.4f}%" if pct >= 0.0001 else f"{pct:.2e}%"
 
 
-def write_summary(output_dir, run_name, unit_list, maximize):
+def write_summary(output_dir, run_name, unit_list, maximize, diversity=None):
     """
     Collapse every candidate scored during the run into one ranked table.
 
@@ -231,15 +252,27 @@ def write_summary(output_dir, run_name, unit_list, maximize):
     """
     full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
 
+    metrics = ["score", "score_std", "tanimoto_dissimilarity", "norm_prediction", "combined_score"]
     by_genome = {}
     with open(full_filename, newline="") as full_file:
         for row in csv.DictReader(full_file):
-            by_genome[row["individual"]] = (
-                float(row["score"]),
-                float(row["score_std"]),
-            )
+            by_genome[row["individual"]] = [float(row[m]) for m in metrics]
 
-    ranked = sorted(by_genome.items(), key=lambda kv: kv[1][0], reverse=maximize)
+    # Population-normalised values were scaled against whichever generation the
+    # candidate happened to appear in, so they are not comparable to each other.
+    # Recompute over every unique candidate to get one consistent ranking.
+    if diversity is not None and diversity.norm_mode == "population":
+        genomes = list(by_genome)
+        predictions = [by_genome[g][0] for g in genomes]
+        renormalised = scoring.normalise_predictions(predictions, diversity)
+        w = diversity.weight
+        for genome, norm_pred in zip(genomes, renormalised):
+            values = by_genome[genome]
+            values[3] = norm_pred
+            values[4] = (1.0 - w) * norm_pred + w * values[2]
+
+    # rank on the combined objective, which is what the GA was actually optimising
+    ranked = sorted(by_genome.items(), key=lambda kv: kv[1][-1], reverse=maximize)
 
     summary_filename = os.path.join(output_dir, "summary_" + run_name + ".csv")
     with open(summary_filename, mode="w+", newline="") as summary_file:
@@ -248,12 +281,14 @@ def write_summary(output_dir, run_name, unit_list, maximize):
         # simply has no acid column rather than an empty one
         component_columns = [f"{_slot_label(comp)}_smiles" for comp in unit_list]
         writer.writerow(
-            ["rank", "score", "score_std", "individual"] + component_columns + ["product_smiles"]
+            ["rank"] + metrics + ["individual"] + component_columns + ["product_smiles"]
         )
-        for rank, (genome, (score, score_std)) in enumerate(ranked, start=1):
+        for rank, (genome, values) in enumerate(ranked, start=1):
             poly = ast.literal_eval(genome)
             writer.writerow(
-                [rank, score, score_std, genome]
+                [rank]
+                + values
+                + [genome]
                 + [unit_list[comp].iloc[idx, 0] for comp, idx in zip(unit_list, poly)]
                 + [Chem.MolToSmiles(utils.make_molecule(poly, unit_list))]
             )
@@ -295,6 +330,7 @@ def next_gen(params):
     spear_counter = params[15]
     spear_thresh = params[16]
     n_jobs = params[18]
+    diversity = params[19]
 
     gen_counter += 1
     ranked_population = fitness_list[1]
@@ -324,6 +360,7 @@ def next_gen(params):
         ref_features_cols,
         maximize,
         n_jobs,
+        diversity,
     )
 
     median = int((len(fitness_list[0]) - 1) / 2)
@@ -360,11 +397,24 @@ def next_gen(params):
         poly = fitness_list[1][x]
         score = fitness_list[0][x]
         score_std = fitness_list[2][x]
+        prediction = fitness_list[3][x]
+        dissimilarity = fitness_list[4][x]
+        norm_prediction = fitness_list[5][x]
 
         full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
         with open(full_filename, mode="a+") as full_file:
             full_writer = csv.writer(full_file)
-            full_writer.writerow([gen_counter, poly, score, score_std])
+            full_writer.writerow(
+                [
+                    gen_counter,
+                    poly,
+                    prediction,
+                    score_std,
+                    dissimilarity,
+                    norm_prediction,
+                    score,
+                ]
+            )
 
     params = [
         pop_size,
@@ -386,6 +436,7 @@ def next_gen(params):
         spear_thresh,
         spear,
         n_jobs,
+        diversity,
     ]
 
     return params
@@ -792,6 +843,7 @@ def init_gen(
     output_dir,
     spear_thresh,
     n_jobs,
+    diversity,
 ):
     """
     Create initial population
@@ -849,7 +901,17 @@ def init_gen(
     full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
     with open(full_filename, mode="w+") as full:
         full_writer = csv.writer(full)
-        full_writer.writerow(["gen", "individual", "score", "score_std"])
+        full_writer.writerow(
+            [
+                "gen",
+                "individual",
+                "score",
+                "score_std",
+                "tanimoto_dissimilarity",
+                "norm_prediction",
+                "combined_score",
+            ]
+        )
 
     fitness_list = scoring.fitness_function(
         population,
@@ -859,6 +921,7 @@ def init_gen(
         ref_features_cols,
         maximize,
         n_jobs,
+        diversity,
     )
 
     median = int((len(fitness_list[0]) - 1) / 2)
@@ -875,11 +938,24 @@ def init_gen(
         poly = fitness_list[1][x]
         score = fitness_list[0][x]
         score_std = fitness_list[2][x]
+        prediction = fitness_list[3][x]
+        dissimilarity = fitness_list[4][x]
+        norm_prediction = fitness_list[5][x]
 
         full_filename = os.path.join(output_dir, "full_analysis_" + run_name + ".csv")
         with open(full_filename, mode="a+") as full_file:
             full_writer = csv.writer(full_file)
-            full_writer.writerow([gen_counter, poly, score, score_std])
+            full_writer.writerow(
+                [
+                    gen_counter,
+                    poly,
+                    prediction,
+                    score_std,
+                    dissimilarity,
+                    norm_prediction,
+                    score,
+                ]
+            )
 
     params = [
         pop_size,
@@ -901,6 +977,7 @@ def init_gen(
         spear_thresh,
         0.0,
         n_jobs,
+        diversity,
     ]
 
     return params
@@ -962,6 +1039,18 @@ if __name__ == "__main__":
     # 4C is the classic four-component Ugi; 3C omits the carboxylic acid and
     # leaves the amine nitrogen secondary instead of acylating it
     parser.add_argument("--mode", type=str, default="4C", choices=["3C", "4C"])
+    # reference pool for the novelty objective; omit to optimise prediction alone
+    parser.add_argument("--reference_smiles", type=str, default=None)
+    # share of the combined score that dissimilarity accounts for
+    parser.add_argument("--dissimilarity_weight", type=float, default=0.5)
+    # how the prediction is put on [0, 1] before blending: against the reference
+    # data's range, or min-maxed within each scored population
+    parser.add_argument(
+        "--normalisation",
+        type=str,
+        default="reference",
+        choices=["reference", "population", "none"],
+    )
 
     args = parser.parse_args()
     if args.mode == "4C" and args.acids is None:
@@ -987,4 +1076,7 @@ if __name__ == "__main__":
         args.conv_gen,
         args.n_jobs,
         args.mode,
+        args.reference_smiles,
+        args.dissimilarity_weight,
+        args.normalisation,
     )
